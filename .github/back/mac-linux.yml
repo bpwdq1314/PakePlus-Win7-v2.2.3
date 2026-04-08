@@ -1,0 +1,242 @@
+name: Build PakePlus
+
+on:
+    push:
+        tags:
+            - 'v*'
+    workflow_dispatch:
+        inputs:
+            version:
+                description: 'Version (例如: 1.0.0)'
+                required: false
+                default: '0.0.1'
+            build_windows:
+                description: 'Build Windows'
+                required: false
+                type: boolean
+                default: true
+            build_mac:
+                description: 'Build macOS'
+                required: false
+                type: boolean
+                default: true
+            build_linux:
+                description: 'Build Linux'
+                required: false
+                type: boolean
+                default: true
+
+permissions:
+    contents: write
+
+jobs:
+    build-windows:
+        if: (github.event_name == 'push') || (github.event.inputs.build_windows == 'true')
+        runs-on: windows-latest
+        strategy:
+            matrix:
+                arch: [x64]
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Setup Node.js
+              uses: actions/setup-node@v4
+              with:
+                  node-version: '18'
+                  cache: 'npm'
+
+            - name: Install dependencies
+              run: npm ci
+
+            - name: Run worker
+              run: node scripts/ppworker.cjs
+
+            - name: Get version number
+              id: version
+              run: |
+                  if ("${{ github.event_name }}" -eq "workflow_dispatch" -and "${{ github.event.inputs.version }}" -ne "") {
+                    echo "version=${{ github.event.inputs.version }}" >> $env:GITHUB_OUTPUT
+                  } else {
+                    $packageJson = Get-Content package.json | ConvertFrom-Json
+                    echo "version=$($packageJson.version)" >> $env:GITHUB_OUTPUT
+                  }
+              shell: pwsh
+
+            - name: Build Windows (${{ matrix.arch }})
+              run: npm run build:win -- --${{ matrix.arch }}
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+            - name: Upload build artifacts
+              uses: actions/upload-artifact@v4
+              with:
+                  name: windows-${{ matrix.arch }}
+                  path: dist/*.exe
+                  retention-days: 30
+
+    build-mac:
+        if: (github.event_name == 'push') || (github.event.inputs.build_mac == 'true')
+        runs-on: macos-latest
+        strategy:
+            matrix:
+                arch: [x64]
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Setup Node.js
+              uses: actions/setup-node@v4
+              with:
+                  node-version: '18'
+                  cache: 'npm'
+
+            - name: Install dependencies
+              run: npm ci
+
+            - name: Run worker
+              run: node scripts/ppworker.cjs
+
+            - name: Get version number
+              id: version
+              run: |
+                  if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.version }}" ]; then
+                    echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+                  else
+                    VERSION=$(node -p "require('./package.json').version")
+                    echo "version=$VERSION" >> $GITHUB_OUTPUT
+                  fi
+
+            - name: Build macOS (${{ matrix.arch }})
+              run: npm run build:mac -- --${{ matrix.arch }}
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+            - name: Upload build artifacts
+              uses: actions/upload-artifact@v4
+              with:
+                  name: mac-${{ matrix.arch }}
+                  path: dist/*.dmg
+                  retention-days: 30
+
+    build-linux:
+        if: (github.event_name == 'push') || (github.event.inputs.build_linux == 'true')
+        runs-on: ubuntu-latest
+        strategy:
+            matrix:
+                arch: [x64]
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Setup Node.js
+              uses: actions/setup-node@v4
+              with:
+                  node-version: '18'
+                  cache: 'npm'
+
+            - name: Install dependencies
+              run: npm ci
+
+            - name: Run worker
+              run: node scripts/ppworker.cjs
+
+            - name: Get version number
+              id: version
+              run: |
+                  if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.version }}" ]; then
+                    echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+                  else
+                    VERSION=$(node -p "require('./package.json').version")
+                    echo "version=$VERSION" >> $GITHUB_OUTPUT
+                  fi
+
+            - name: Build Linux (${{ matrix.arch }})
+              run: npm run build:linux -- --${{ matrix.arch }}
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+            - name: Upload build artifacts
+              uses: actions/upload-artifact@v4
+              with:
+                  name: linux-${{ matrix.arch }}
+                  path: dist/*.AppImage
+                  retention-days: 30
+
+    release:
+        needs: [build-windows]
+        runs-on: ubuntu-latest
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        permissions:
+            contents: write
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Get version number
+              id: version
+              run: |
+                  if [ "${{ github.event_name }}" == "workflow_dispatch" ] && [ -n "${{ github.event.inputs.version }}" ]; then
+                    echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+                  else
+                    VERSION=$(node -p "require('./package.json').version")
+                    echo "version=$VERSION" >> $GITHUB_OUTPUT
+                  fi
+
+            - name: Download all build artifacts
+              uses: actions/download-artifact@v4
+              with:
+                  path: artifacts
+                  pattern: '*'
+                  merge-multiple: true
+
+            - name: Rename files (prefix with branch or tag name)
+              run: |
+                  PREFIX="${{ github.ref_name }}"
+                  echo "Prefix: $PREFIX"
+                  for file in artifacts/*.{exe,dmg,AppImage}; do
+                    if [ -f "$file" ]; then
+                      dir=$(dirname "$file")
+                      base=$(basename "$file")
+                      new_file="$dir/$PREFIX-$base"
+                      if [ "$file" != "$new_file" ]; then
+                        mv "$file" "$new_file"
+                        echo "Rename: $file -> $new_file"
+                      fi
+                    fi
+                  done
+                  find artifacts -type f \( -name "*.exe" -o -name "*.dmg" -o -name "*.AppImage" \) | while read file; do
+                    dir=$(dirname "$file")
+                    base=$(basename "$file")
+                    if [[ "$base" != "$PREFIX-"* ]]; then
+                      new_file="$dir/$PREFIX-$base"
+                      mv "$file" "$new_file"
+                      echo "Rename: $file -> $new_file"
+                    fi
+                  done
+
+            - name: Create Release
+              uses: softprops/action-gh-release@v1
+              with:
+                  tag_name: ${{ github.ref_name }}
+                  name: Release v${{ steps.version.outputs.version }}
+                  body: |
+                      ## 多平台版本发布 v${{ steps.version.outputs.version }}
+
+                      自动构建的 Windows/macOS/Linux 版本。
+
+                      ### 文件说明
+                      - `*setup.exe`: Windows 安装程序
+                      - `*.exe` (非setup): Windows 便携
+                      - `*.dmg`: macOS 安装包
+                      - `*.AppImage`: Linux 可执行包
+
+                      ### 系统要求
+                      - Windows 7及更高 / macOS 10.13及更高 / Linux发行版
+                      - 请根据系统架构选择对应版本
+                  files: |
+                      artifacts/**/*.exe
+                      artifacts/**/*.dmg
+                      artifacts/**/*.AppImage
+                  draft: false
+                  prerelease: false

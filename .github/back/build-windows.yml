@@ -1,0 +1,165 @@
+name: Build Windows
+
+on:
+    push:
+        tags:
+            - 'v*'
+    workflow_dispatch:
+        inputs:
+            version:
+                description: '版本号 (例如: 1.0.0)'
+                required: false
+                default: '0.0.1'
+
+permissions:
+    contents: write
+
+jobs:
+    build-windows:
+        runs-on: windows-latest
+
+        strategy:
+            matrix:
+                arch: [x64]
+
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Setup Node.js
+              uses: actions/setup-node@v4
+              with:
+                  node-version: '18'
+                  cache: 'npm'
+
+            - name: Install dependencies
+              run: npm ci
+
+            - name: Run worker
+              run: node scripts/ppworker.cjs
+
+            - name: Get version number
+              id: version
+              run: |
+                  if ("${{ github.event_name }}" -eq "workflow_dispatch" -and "${{ github.event.inputs.version }}" -ne "") {
+                    echo "version=${{ github.event.inputs.version }}" >> $env:GITHUB_OUTPUT
+                  } else {
+                    $packageJson = Get-Content package.json | ConvertFrom-Json
+                    echo "version=$($packageJson.version)" >> $env:GITHUB_OUTPUT
+                  }
+              shell: pwsh
+
+            - name: Build Windows (${{ matrix.arch }})
+              run: npm run build:win -- --${{ matrix.arch }}
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+            - name: List build artifacts
+              run: dir dist /B
+              shell: cmd
+
+            - name: Upload build artifacts
+              uses: actions/upload-artifact@v4
+              with:
+                  name: windows-${{ matrix.arch }}
+                  path: dist/*.exe
+                  retention-days: 30
+
+    release:
+        needs: build-windows
+        runs-on: ubuntu-latest
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+
+        permissions:
+            contents: write
+
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Get version number
+              id: version
+              run: |
+                  if [ "${{ github.event_name }}" == "workflow_dispatch" ] && [ -n "${{ github.event.inputs.version }}" ]; then
+                    echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+                  else
+                    VERSION=$(node -p "require('./package.json').version")
+                    echo "version=$VERSION" >> $GITHUB_OUTPUT
+                  fi
+
+            - name: Download all build artifacts
+              uses: actions/download-artifact@v4
+              with:
+                  path: artifacts
+                  pattern: windows-*
+                  merge-multiple: true
+
+            - name: List downloaded file structure
+              run: |
+                  echo "=== 文件结构 ==="
+                  find artifacts -type f -name "*.exe" | sort
+                  echo "=== 文件详情 ==="
+                  ls -la artifacts/
+                  if [ -d "artifacts/windows-ia32" ]; then
+                    echo "=== windows-ia32 目录 ==="
+                    ls -la artifacts/windows-ia32/
+                  fi
+                  if [ -d "artifacts/windows-x64" ]; then
+                    echo "=== windows-x64 目录 ==="
+                    ls -la artifacts/windows-x64/
+                  fi
+
+            - name: Rename files (prefix with branch or tag name)
+              run: |
+                  PREFIX="${{ github.ref_name }}"
+
+                  echo "使用前缀: $PREFIX"
+
+                  # 处理 artifacts 根目录
+                  for file in artifacts/*.exe; do
+                    if [ -f "$file" ]; then
+                      dir=$(dirname "$file")
+                      base=$(basename "$file")
+                      new_file="$dir/$PREFIX-$base"
+
+                      if [ "$file" != "$new_file" ]; then
+                        mv "$file" "$new_file"
+                        echo "重命名: $file -> $new_file"
+                      fi
+                    fi
+                  done
+
+                  # 处理子目录中的 exe 文件
+                  find artifacts -type f -name "*.exe" | while read file; do
+                    dir=$(dirname "$file")
+                    base=$(basename "$file")
+
+                    # 避免重复加前缀
+                    if [[ "$base" != "$PREFIX-"* ]]; then
+                      new_file="$dir/$PREFIX-$base"
+                      mv "$file" "$new_file"
+                      echo "重命名: $file -> $new_file"
+                    fi
+                  done
+
+            - name: Create Release
+              uses: softprops/action-gh-release@v1
+              with:
+                  tag_name: ${{ github.ref_name }}
+                  name: Release v${{ steps.version.outputs.version }}
+                  body: |
+                      ## Windows 版本发布 v${{ steps.version.outputs.version }}
+
+                      自动构建的 Windows 版本，包含 32位 和 64位 架构。
+
+                      ### 文件说明
+                      - `*setup.exe`: 安装程序版本
+                      - `*.exe` (非setup): 便携版本
+
+                      ### 系统要求
+                      - Windows 7 或更高版本
+                      - 请根据您的系统架构选择对应的版本
+                  files: |
+                      artifacts/**/*.exe
+                  draft: false
+                  prerelease: false
