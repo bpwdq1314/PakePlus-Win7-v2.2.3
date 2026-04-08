@@ -1,0 +1,15 @@
+{
+    "$schema": "https://schema.tauri.app/config/2",
+    "identifier": "com.pakeplus.win7",
+    "productName": "PakePlusWin7",
+    "version": "1.0.0",
+    "build": {
+        "frontendDist": "../dist",
+        "devUrl": "http://localhost:3000"
+    },
+    "app": {
+        "windows": [{ "title": "PakePlusWin7", "width": 800, "height": 600 }]
+    },
+    "bundle": {},
+    "plugins": {}
+}
